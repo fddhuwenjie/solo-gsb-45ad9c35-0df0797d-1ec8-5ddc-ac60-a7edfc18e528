@@ -23,6 +23,8 @@ const state = {
   editingId: null,
   pxPerMin: 2,
   dragging: null,
+  review: null,        // 最近一次复核结果
+  reviewPx: 2,
 };
 
 const fmtMin = (m) => {
@@ -783,4 +785,472 @@ $('#resetDragBtn').onclick = () => {
 };
 $('#exportBtn').onclick = exportJSON;
 
+// --------------------------------------------------------------------------- //
+// 实测湿度复核
+// --------------------------------------------------------------------------- //
+const rvFmtMin = (m) => {
+  const x = Number(m);
+  const d = Math.floor(x / 1440), h = Math.floor((x % 1440) / 60),
+        min = x - d * 1440 - h * 60;
+  const ms = Math.abs(min - Math.round(min)) < 1e-7
+    ? String(Math.round(min)) : String(parseFloat(min.toFixed(2)));
+  return (d ? d + 'd' : '') + (h ? h + 'h' : '') + ((ms !== '0' || (!d && !h)) ? ms + 'm' : '');
+};
+const rvConclusionName = { pass: '通过', review: '复核', insufficient: '数据不足' };
+
+// 从排程 segments 还原计划曲线整数分钟节点 rh[t]
+function planSeriesFromSegments(segments) {
+  if (!segments?.length) return [];
+  const lastEnd = Math.max(...segments.map(s => s.end));
+  const rh = new Array(lastEnd).fill(null);
+  for (const seg of segments) {
+    const s = seg.start, e = seg.end;
+    if (seg.kind === 'hold') {
+      for (let t = s; t < e; t++) rh[t] = seg.start_rh;
+    } else {
+      const frm = seg.from_rh ?? seg.start_rh;
+      const slope = (seg.end_rh - frm) / (e - s);
+      for (let k = 0; k < e - s; k++) rh[s + k] = frm + (k + 1) * slope;
+    }
+  }
+  return rh.map(v => v == null ? null : Number(v.toFixed(5)));
+}
+
+function rvParams() {
+  const tol = parseFloat($('#rvTol').value);
+  const dose = parseFloat($('#rvDose').value);
+  const gap = parseInt($('#rvGap').value, 10);
+  const start = parseInt($('#rvStart').value || '0', 10);
+  if (!(tol >= 0)) return { error: '允许偏差必须为 ≥0 的数字' };
+  if (!(dose >= 0)) return { error: '累计偏差剂量上限必须为 ≥0 的数字' };
+  if (!(gap >= 1)) return { error: '最大采样间隔必须为 ≥1 的整数分钟' };
+  if (!(start >= 0)) return { error: '单列读数起始分钟必须为 ≥0 的整数' };
+  return { tol, dose, gap, start };
+}
+
+async function runReview({ save = false } = {}) {
+  const p = rvParams();
+  if (p.error) { setRvStatus(p.error, 'bad'); return; }
+  if (!state.result) {
+    setRvStatus('请先在④生成（或载入）排程，再进行实测复核。', 'bad');
+    return;
+  }
+  if (!state.result.feasible) {
+    setRvStatus('当前排程不可行，无法复核：请先在④生成可行排程。', 'bad');
+    return;
+  }
+  const text = $('#rvText').value;
+  if (!text.trim()) {
+    setRvStatus('请先粘贴传感器读数。', 'bad');
+    return;
+  }
+  setRvStatus('正在按分段线性曲线精确积分…', 'warn');
+  try {
+    const body = {
+      // 显式带上当前时间轴（可能含拖拽后的手工排程），避免用旧的库内快照
+      schedule: state.result,
+      readings_text: text, start_minute: p.start,
+      tolerance: p.tol, dose_limit: p.dose, max_gap: p.gap,
+      save, note: $('#rvNote').value.trim(),
+    };
+    const out = await api('/api/review', { method: 'POST', body });
+    state.review = out;
+    renderReview(out);
+    if (save) loadReviewRecords();
+    setRvStatus(out.overall_conclusion_label === '通过'
+      ? `✓ 复核完成：${out.summary.pass}/${out.summary.total} 个样本通过。`
+      : out.overall_conclusion_label === '复核'
+        ? `⚠ ${out.summary.review} 个样本累计偏差剂量超限，需要复核。`
+        : `⛔ ${out.summary.insufficient} 个样本数据不足（存在采样缺口或窗口未覆盖）。`,
+      out.overall_conclusion_label === '通过' ? 'ok'
+        : out.overall_conclusion_label === '复核' ? 'bad' : 'warn');
+  } catch (e) {
+    setRvStatus('复核失败：' + e.message, 'bad');
+  }
+}
+
+function fillPlanReadings() {
+  if (!state.result?.feasible) {
+    setRvStatus('请先生成可行排程。', 'bad');
+    return;
+  }
+  // 填入单列湿度：时间轴由「单列读数起始分钟」自动解释，保持与排程分钟对齐
+  const rh = planSeriesFromSegments(state.result.segments);
+  if (!rh.length) return setRvStatus('排程时间轴为空。', 'bad');
+  $('#rvText').value = rh.map(v => String(Number(v.toFixed(2)))).join('\n');
+  setRvStatus(`已按计划值填入 ${rh.length} 条读数（0 偏差基线，可据此修改实测值）。`, 'ok');
+}
+
+// ---- 渲染 ------------------------------------------------------------------ //
+function setRvStatus(msg, kind = '') {
+  const el = $('#rvStatus');
+  el.textContent = msg;
+  el.className = 'status ' + kind;
+}
+
+function reviewMinutes(out) {
+  let max = out.schedule?.end_minute || 0;
+  for (const s of out.samples) max = Math.max(max, s.unboard ?? s.board);
+  for (const [t] of out.readings || []) max = Math.max(max, t);
+  return Math.max(30, max + 10);
+}
+
+function renderReview(out) {
+  const total = reviewMinutes(out);
+  state.reviewPx = total > 1000 ? 0.8 : total > 500 ? 1.2 : 2;
+  const W = Math.max(640, total * state.reviewPx + 120);
+  renderRvRuler(W, total);
+  renderRvChart(W, total, out);
+  renderRvLanes(W, out);
+  renderRvSamples(out);
+}
+
+function renderRvRuler(W, total) {
+  const ruler = $('#rvRuler');
+  ruler.style.width = W + 'px';
+  ruler.innerHTML = '<span class="track-label" style="background:transparent">时间 →</span>';
+  const step = total > 1000 ? 120 : total > 500 ? 60 : 30;
+  for (let m = 0; m <= total; m += step) {
+    const t = document.createElement('div');
+    t.className = 'tick';
+    t.style.left = (74 + m * state.reviewPx) + 'px';
+    t.textContent = fmtMin(m);
+    ruler.appendChild(t);
+  }
+}
+
+function renderRvChart(W, total, out) {
+  const chart = $('#rvChart');
+  chart.style.width = W + 'px';
+  chart.innerHTML = '<span class="track-label">湿度%</span>';
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('x', 74); svg.setAttribute('y', 0);
+  svg.setAttribute('width', W - 74); svg.setAttribute('height', 150);
+  svg.style.left = '74px';
+  const TOP = 18, BOT = 12;
+  const xOf = m => m * state.reviewPx;
+  const yOf = rh => TOP + (1 - rh / 100) * (150 - TOP - BOT);
+
+  // 参考线
+  for (const v of [0, 25, 50, 75, 100]) {
+    const line = document.createElementNS(svgNS, 'line');
+    line.setAttribute('x1', 0); line.setAttribute('x2', W - 80);
+    line.setAttribute('y1', yOf(v)); line.setAttribute('y2', yOf(v));
+    line.setAttribute('stroke', v === 50 ? '#e2dac8' : '#f0ecdf');
+    svg.appendChild(line);
+    const lab = document.createElementNS(svgNS, 'text');
+    lab.setAttribute('x', 2); lab.setAttribute('y', yOf(v) - 2);
+    lab.setAttribute('font-size', 9); lab.setAttribute('fill', '#a89f8c');
+    lab.textContent = v;
+    svg.appendChild(lab);
+  }
+
+  const tol = out.parameters.tolerance;
+  const plan = out.plan_series || [];
+  const N = plan.length;
+
+  // 允许带（采样整分钟节点画带，按每个样本窗口取并集略复杂；
+  // 这里以全时间轴计划带为底，再用样本窗口遮罩出有效区）
+  const windowMins = new Set();
+  for (const s of out.samples) {
+    const end = s.unboard ?? s.board;
+    for (let t = s.board; t < end; t++) windowMins.add(t);
+  }
+  const gapMins = new Set();
+  for (const g of out.gaps || []) {
+    for (let t = g.start; t < g.end; t++) gapMins.add(t);
+  }
+  if (N > 1) {
+    const up = [], lo = [];
+    for (let i = 0; i < N; i++) {
+      if (!windowMins.has(i)) continue;
+      up.push([xOf(i), yOf(plan[i][1] + tol)]);
+      lo.push([xOf(i), yOf(plan[i][1] - tol)]);
+    }
+    if (up.length > 1) {
+      // 连续分钟合并成一条条带 path，入箱/出箱（或缺口）处断开
+      const segs2 = [];
+      let cur = [0];
+      for (let i = 1; i < up.length; i++) {
+        const minute = Math.round(up[i][0] / state.reviewPx);
+        const prevMinute = Math.round(up[i - 1][0] / state.reviewPx);
+        const cont = minute === prevMinute + 1 && !gapMins.has(prevMinute);
+        if (cont) cur.push(i);
+        else { segs2.push(cur); cur = [i]; }
+      }
+      segs2.push(cur);
+      for (const segIdx of segs2) {
+        if (segIdx.length < 2) continue;
+        let d = '';
+        segIdx.forEach((idx, k) => { d += `${k ? 'L' : 'M'}${up[idx][0]},${up[idx][1]}`; });
+        for (let k = segIdx.length - 1; k >= 0; k--) {
+          const idx = segIdx[k];
+          d += `L${lo[idx][0]},${lo[idx][1]}`;
+        }
+        d += 'Z';
+        const poly = document.createElementNS(svgNS, 'path');
+        poly.setAttribute('d', d);
+        poly.setAttribute('fill', 'rgba(94,139,110,.15)');
+        poly.setAttribute('stroke', 'none');
+        svg.appendChild(poly);
+      }
+    }
+  }
+
+  // 计划曲线
+  if (N > 1) {
+    let d = `M${xOf(0)},${yOf(plan[0][1])}`;
+    for (let i = 1; i < N; i++) d += `L${xOf(i)},${yOf(plan[i][1])}`;
+    const path = document.createElementNS(svgNS, 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', '#5e8b6e');
+    path.setAttribute('stroke-width', '2');
+    svg.appendChild(path);
+  }
+
+  // 采样缺口背景（缺口内不插值：断开实测线）
+  for (const g of out.gaps || []) {
+    const rect = document.createElementNS(svgNS, 'rect');
+    rect.setAttribute('x', xOf(g.start));
+    rect.setAttribute('width', (g.end - g.start) * state.reviewPx);
+    rect.setAttribute('y', 0); rect.setAttribute('height', 150);
+    rect.setAttribute('fill', 'rgba(192,57,43,.07)');
+    svg.appendChild(rect);
+  }
+
+  // 实测曲线：缺口处断开
+  const readings = out.readings || [];
+  const drawMeasuredPath = (pts, stroke, width, dash) => {
+    if (pts.length < 2) return;
+    let d = `M${xOf(pts[0][0])},${yOf(pts[0][1])}`;
+    for (let i = 1; i < pts.length; i++) {
+      const gapHere = (out.gaps || []).some(g =>
+        pts[i - 1][0] === g.start && pts[i][0] === g.end);
+      d += `${gapHere ? 'M' : 'L'}${xOf(pts[i][0])},${yOf(pts[i][1])}`;
+    }
+    const path = document.createElementNS(svgNS, 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', stroke);
+    path.setAttribute('stroke-width', '' + width);
+    if (dash) path.setAttribute('stroke-dasharray', dash);
+    svg.appendChild(path);
+  };
+  drawMeasuredPath(readings, '#34507d', 1.8);
+
+  // 超带部分用红色加粗重描（按分钟格逐段判定，含亚分钟交叉）
+  const measAt = t => {
+    // t 为整数分钟；在可插值采样区间内线性取值
+    for (let i = 0; i < readings.length - 1; i++) {
+      const [t0, v0] = readings[i], [t1, v1] = readings[i + 1];
+      if (t0 <= t && t <= t1) {
+        if ((out.gaps || []).some(g => t0 === g.start && t1 === g.end)) return null;
+        return v0 + (v1 - v0) * (t - t0) / (t1 - t0);
+      }
+    }
+    return null;
+  };
+  for (let i = 0; i + 1 < N; i++) {
+    if (!windowMins.has(i)) continue;
+    const m0 = measAt(i), m1 = measAt(i + 1);
+    if (m0 == null || m1 == null) continue;
+    const d0 = m0 - plan[i][1], d1 = m1 - plan[i + 1][1];
+    for (const side of [1, -1]) {
+      const f0 = side > 0 ? d0 - tol : -d0 - tol;
+      const f1 = side > 0 ? d1 - tol : -d1 - tol;
+      if (f0 <= 0 && f1 <= 0) continue;
+      let r0 = 0, r1 = 1;
+      if (!(f0 > 0 && f1 > 0)) {
+        const r = f0 / (f0 - f1);
+        if (f0 <= 0) r0 = Math.max(0, r); else r1 = Math.min(1, r);
+      }
+      // 超带红线直接沿实测曲线的超带子段绘制
+      const line = document.createElementNS(svgNS, 'line');
+      line.setAttribute('x1', xOf(i + r0));
+      line.setAttribute('x2', xOf(i + r1));
+      const mv0 = m0 + (m1 - m0) * r0;
+      const mv1 = m0 + (m1 - m0) * r1;
+      line.setAttribute('y1', yOf(mv0));
+      line.setAttribute('y2', yOf(mv1));
+      line.setAttribute('stroke', '#c0392b');
+      line.setAttribute('stroke-width', '2.4');
+      svg.appendChild(line);
+    }
+  }
+
+  // 读数点
+  for (const [t, v] of readings) {
+    const c = document.createElementNS(svgNS, 'circle');
+    c.setAttribute('cx', xOf(t)); c.setAttribute('cy', yOf(v));
+    c.setAttribute('r', 1.6); c.setAttribute('fill', '#34507d');
+    svg.appendChild(c);
+  }
+
+  // 样本入箱/出箱竖线
+  for (const s of out.samples) {
+    for (const t of [s.board, s.unboard].filter(x => x != null)) {
+      const line = document.createElementNS(svgNS, 'line');
+      line.setAttribute('x1', xOf(t)); line.setAttribute('x2', xOf(t));
+      line.setAttribute('y1', 4); line.setAttribute('y2', 146);
+      line.setAttribute('stroke', '#b98a4e');
+      line.setAttribute('stroke-dasharray', '3 3');
+      line.setAttribute('stroke-width', '1');
+      svg.appendChild(line);
+    }
+  }
+  chart.appendChild(svg);
+}
+
+function renderRvLanes(W, out) {
+  const box = $('#rvLanes');
+  box.innerHTML = '';
+  for (const s of out.samples) {
+    const row = document.createElement('div');
+    row.className = 'rv-lane';
+    row.style.width = W + 'px';
+    const name = document.createElement('span');
+    name.className = 'lane-name';
+    name.textContent = s.code;
+    row.appendChild(name);
+    const end = s.unboard ?? s.board;
+    const win = document.createElement('div');
+    win.className = 'rv-window';
+    win.style.left = (74 + s.board * state.reviewPx) + 'px';
+    win.style.width = Math.max(8, (end - s.board) * state.reviewPx) + 'px';
+    win.style.background = { pass: '#5e8b6e', review: '#c0392b',
+      insufficient: '#b08d3f' }[s.conclusion];
+    win.textContent = `${rvConclusionName[s.conclusion]} · ${fmtMin(s.board)}–${
+      s.unboard == null ? '?' : fmtMin(s.unboard)}`;
+    row.appendChild(win);
+    for (const u of s.uncovered || []) {
+      const g = document.createElement('div');
+      g.className = 'rv-gapband';
+      g.style.left = (74 + u.start * state.reviewPx) + 'px';
+      g.style.width = Math.max(3, (u.end - u.start) * state.reviewPx) + 'px';
+      g.title = u.reason_label;
+      row.appendChild(g);
+    }
+    box.appendChild(row);
+  }
+}
+
+function renderRvSamples(out) {
+  const box = $('#rvSamples');
+  box.innerHTML = '';
+  for (const s of out.samples) {
+    const div = document.createElement('div');
+    div.className = 'rv-sample ' + s.conclusion;
+    const limitOver = s.dose > s.dose_limit + 1e-6;
+    const intervals = (s.excess_intervals || []);
+    const ivHtml = intervals.length
+      ? intervals.map(v => {
+          const dir = v.side === '+' ? '偏高' : '偏低';
+          return `<span class="iv-row ${v.side === '-' ? 'neg' : ''}">${
+            rvFmtMin(v.start)}–${rvFmtMin(v.end)} ${esc(v.phase)} ${dir} · 剂量 ${
+            num(v.dose)} · 最大偏差 ${num(v.max_deviation)}%</span>`;
+        }).join('')
+      : '<span class="none">无超带区间 ✓</span>';
+    const uncHtml = (s.uncovered || []).length
+      ? `<div class="rv-uncovered">未覆盖/缺口（不插值）：${
+          s.uncovered.map(u => `<span class="u">${rvFmtMin(u.start)}–${
+            rvFmtMin(u.end)} ${esc(u.reason_label)}</span>`).join('')}</div>`
+      : '';
+    div.innerHTML = `
+      <div class="rv-head">
+        <span class="code">${esc(s.code)}</span>
+        <span class="badge ${s.conclusion}">${
+          rvConclusionName[s.conclusion] || s.conclusion}</span>
+        <span style="font-size:11.5px;color:#998f7d">在箱窗口 ${
+          fmtMin(s.board)}–${s.unboard == null ? '?' : fmtMin(s.unboard)}
+          （${s.window_minutes ?? '—'} 分钟）</span>
+      </div>
+      <div class="rv-metrics">
+        <span>累计偏差剂量：<b class="${limitOver ? 'over-limit' : ''}">${
+          num(s.dose)}</b> / 上限 ${num(s.dose_limit)} %RH·分钟${
+          limitOver ? '（超限）' : ''}</span>
+        <span>窗口内最大偏差：<b>${num(s.max_deviation)}</b> %RH</span>
+        <span>允许带 ±${num(s.tolerance)} %RH ｜ 采样间隔上限 ${s.max_gap} 分钟</span>
+        <span>数据：${s.data_complete ? '完整' : '不完整（' +
+          (s.uncovered || []).length + ' 处未覆盖）'}</span>
+      </div>
+      <div class="rv-intervals">超带区间（按计划阶段切分）：${ivHtml}</div>
+      ${uncHtml}`;
+    box.appendChild(div);
+  }
+}
+
+// ---- 记录 ------------------------------------------------------------------ //
+async function loadReviewRecords() {
+  const box = $('#rvRecordList');
+  box.innerHTML = '';
+  let list = [];
+  try {
+    list = await api('/api/reviews');
+  } catch { list = []; }
+  if (!list.length) {
+    box.innerHTML = '<div style="color:#998f7d;font-size:12px;margin-top:6px">尚无已保存复核记录。</div>';
+    return;
+  }
+  for (const r of list) {
+    const div = document.createElement('div');
+    div.className = 'rv-record';
+    const s = r.summary || {};
+    const name = rvConclusionName[r.conclusion] || r.conclusion;
+    div.innerHTML = `<span><span class="dot ${r.conclusion}"></span>#${r.id} · ${
+      esc(r.created_at)} · <b>${name}</b> · 通过 ${s.pass ?? 0}/复核 ${
+      s.review ?? 0}/数据不足 ${s.insufficient ?? 0}${
+      r.note ? ' · ' + esc(r.note) : ''}</span>
+      <span class="ops">
+        <button class="mini" data-act="view">查看</button>
+        <button class="mini" data-act="json">JSON</button>
+        <button class="mini del" data-act="del">删除</button>
+      </span>`;
+    div.querySelector('[data-act="view"]').onclick = async () => {
+      const rec = await api(`/api/reviews/${r.id}`);
+      state.review = rec.payload;
+      renderReview(rec.payload);
+      setRvStatus(`已载入复核记录 #${r.id}（${rec.created_at}）。`, 'ok');
+    };
+    div.querySelector('[data-act="json"]').onclick = () => {
+      downloadReviewJSON(r.payload, `humidity-review-${r.id}.json`);
+    };
+    div.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm(`确定删除复核记录 #${r.id}？`)) return;
+      await api(`/api/reviews/${r.id}`, { method: 'DELETE' });
+      loadReviewRecords();
+    };
+    box.appendChild(div);
+  }
+}
+
+function downloadReviewJSON(payload, filename) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)],
+    { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename || `humidity-review-${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function exportReviewJSON() {
+  if (!state.review) {
+    setRvStatus('请先执行一次复核。', 'bad');
+    return;
+  }
+  const payload = state.review.review_id
+    ? state.review
+    : { exported_at: new Date().toISOString(), ...state.review };
+  downloadReviewJSON(payload);
+}
+
+$('#rvRun').onclick = () => runReview({ save: false });
+$('#rvSave').onclick = () => runReview({ save: true });
+$('#rvFill').onclick = fillPlanReadings;
+$('#rvExport').onclick = exportReviewJSON;
+$('#rvReload').onclick = loadReviewRecords;
+
 loadAll().catch(e => setStatus('初始化失败：' + e.message, 'bad'));
+loadReviewRecords();

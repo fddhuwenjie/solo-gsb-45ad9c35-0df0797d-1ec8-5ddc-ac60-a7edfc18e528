@@ -76,6 +76,81 @@
 
     <div id="detail" class="detail hidden"></div>
   </section>
+
+  <!-- 实测湿度复核 -->
+  <section class="panel wide" id="reviewPanel" style="grid-column: 1 / -1;">
+    <div class="panel-head">
+      <h2>⑤ 一次试验实测湿度复核（载入最近排程时间轴）</h2>
+      <div class="legend">
+        <span><i class="lg plan"></i>计划</span>
+        <span><i class="lg meas"></i>实测</span>
+        <span><i class="lg band"></i>允许带</span>
+        <span><i class="lg over"></i>超带</span>
+        <span><i class="lg gap"></i>采样缺口</span>
+      </div>
+    </div>
+
+    <div class="review-layout">
+      <div class="review-controls">
+        <label class="full">粘贴传感器读数（每行一条：「分钟,湿度」两列，或单列湿度按分钟递增）
+          <textarea id="rvText" rows="9" placeholder=
+"例如（从 0 分钟起，每行一个湿度值）：
+50.0
+50.1
+50.2
+…
+也可写两列：
+0, 50.0
+1, 50.1"></textarea>
+        </label>
+        <div class="form-grid">
+          <label>单列读数起始分钟
+            <input id="rvStart" type="number" min="0" step="1" value="0">
+          </label>
+          <label>允许偏差 %RH
+            <input id="rvTol" type="number" min="0" step="0.1" value="2">
+          </label>
+          <label>累计偏差剂量上限（%RH·分钟）
+            <input id="rvDose" type="number" min="0" step="0.5" value="30">
+          </label>
+          <label>最大采样间隔（分钟）
+            <input id="rvGap" type="number" min="1" step="1" value="2">
+          </label>
+          <label class="full">备注
+            <input id="rvNote" type="text" placeholder="如：2026-09-28 第一次实测">
+          </label>
+        </div>
+        <div class="runbar">
+          <button class="btn primary" id="rvRun">▷ 载入最近排程并复核</button>
+          <button class="btn" id="rvFill" title="用计划值生成每分钟读数（偏差 0），便于试算">用计划值填满</button>
+          <button class="btn" id="rvSave">💾 保存复核记录</button>
+          <button class="btn" id="rvExport">⬇ 导出复核 JSON</button>
+        </div>
+        <div class="form-hint">
+          计划与实测均按<b>分段线性曲线</b>处理：在每个样本入箱→出箱窗口内按计划阶段切分，
+          用解析式精确积分超出允许带后的 |实测−计划| 面积（%RH·分钟）。
+          相邻采样间隔超过上限的区间为<b>采样缺口</b>，不插值、不计剂量，
+          该样本结论为<b>「数据不足」</b>；数据完整且剂量不超限才<b>「通过」</b>，否则<b>「复核」</b>。
+        </div>
+
+        <div class="panel-head mt">
+          <h3 style="font-size:13.5px">已保存复核记录</h3>
+          <button class="btn small" id="rvReload">↻ 刷新</button>
+        </div>
+        <div id="rvRecordList"></div>
+      </div>
+
+      <div class="review-output">
+        <div id="rvStatus" class="status">尚未复核。先在上方④生成排程，再粘贴本次试验的实测读数。</div>
+        <div class="timeline-wrap">
+          <div id="rvRuler" class="ruler"></div>
+          <div id="rvChart" class="rv-chart"></div>
+          <div id="rvLanes"></div>
+        </div>
+        <div id="rvSamples"></div>
+      </div>
+    </div>
+  </section>
 </main>
 
 <!-- 样本编辑弹层 -->

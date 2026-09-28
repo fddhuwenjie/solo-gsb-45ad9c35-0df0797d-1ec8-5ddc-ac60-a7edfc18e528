@@ -10,6 +10,7 @@ import os
 from flask import Flask, jsonify, request, send_from_directory
 
 from . import scheduler
+from . import review as review_mod
 from .db import DB
 from .seed import seed_if_empty
 
@@ -197,6 +198,107 @@ def latest():
     if s is None:
         return jsonify({})
     return jsonify(s)
+
+
+# --------------------------------------------------------------------------- #
+# 实测湿度复核
+# --------------------------------------------------------------------------- #
+def _coerce_readings(body: dict):
+    """body 可给 readings_text（粘贴文本 + start_minute）或 readings=[[t,v],…]。"""
+    if body.get('readings') is not None:
+        raw = body.get('readings')
+        if not isinstance(raw, list):
+            raise review_mod.ReviewError("readings 必须是 [[分钟,湿度],…] 数组")
+        out = []
+        for i, item in enumerate(raw):
+            try:
+                t, v = float(item[0]), float(item[1])
+            except (TypeError, ValueError, IndexError):
+                raise review_mod.ReviewError(f"第 {i + 1} 条读数格式非法")
+            if abs(t - round(t)) > 1e-9 or t < 0:
+                raise review_mod.ReviewError(f"第 {i + 1} 条读数分钟必须为 ≥0 的整数")
+            out.append((int(round(t)), v))
+        for (t0, _), (t1, _) in zip(out, out[1:]):
+            if t1 <= t0:
+                raise review_mod.ReviewError("读数时间必须按分钟严格递增")
+        return out
+    start = body.get('start_minute', 0)
+    try:
+        start = int(float(start))
+    except (TypeError, ValueError):
+        raise review_mod.ReviewError("起始分钟必须为整数")
+    return review_mod.parse_readings(body.get('readings_text', ''), start)
+
+
+def _overall_conclusion(res: dict) -> str:
+    s = res['summary']
+    if s['insufficient'] > 0:
+        return review_mod.CONCLUSION_INSUFFICIENT
+    if s['review'] > 0:
+        return review_mod.CONCLUSION_REVIEW
+    return review_mod.CONCLUSION_PASS
+
+
+@app.post('/api/review')
+def run_review():
+    """对最近排程（或 body.schedule 覆盖）执行实测湿度复核。
+
+    body: {readings_text, start_minute?, readings?, tolerance, dose_limit,
+           max_gap, save?, note?}
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    schedule_obj = body.get('schedule')
+    if not schedule_obj:
+        schedule_obj = db.latest_schedule()
+    if not schedule_obj:
+        return jsonify({'error': '尚无排程快照：请先在编排台生成排程'}), 400
+    if not schedule_obj.get('feasible'):
+        return jsonify({'error': '最近一次排程不可行，无法复核；请先生成可行排程'}), 400
+    try:
+        readings = _coerce_readings(body)
+        band, limit, max_gap = review_mod.normalize_parameters(
+            body.get('tolerance'), body.get('dose_limit'),
+            body.get('max_gap'))
+        res = review_mod.review_run(schedule_obj, readings, band, limit, max_gap)
+    except review_mod.ReviewError as e:
+        return jsonify({'error': str(e)}), 400
+    overall = _overall_conclusion(res)
+    res['overall_conclusion'] = overall
+    res['overall_conclusion_label'] = \
+        review_mod.CONCLUSION_LABELS[overall]
+    if body.get('save'):
+        note = str(body.get('note') or '')
+        rid = db.save_review(res, overall, note)
+        res['saved'] = True
+        res['review_id'] = rid
+        created = db.get_review(rid)
+        res['created_at'] = created['created_at'] if created else None
+    else:
+        res['saved'] = False
+    return jsonify(res)
+
+
+@app.get('/api/reviews')
+def list_reviews():
+    try:
+        limit = max(1, min(200, int(request.args.get('limit', 50))))
+    except ValueError:
+        limit = 50
+    return jsonify(db.list_reviews(limit))
+
+
+@app.get('/api/reviews/<int:rid>')
+def get_review(rid: int):
+    rec = db.get_review(rid)
+    if rec is None:
+        return jsonify({'error': '复核记录不存在'}), 404
+    return jsonify(rec)
+
+
+@app.delete('/api/reviews/<int:rid>')
+def remove_review(rid: int):
+    db.delete_review(rid)
+    return jsonify({'ok': True})
 
 
 @app.errorhandler(500)

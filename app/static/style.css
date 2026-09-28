@@ -245,3 +245,99 @@ input, select {
   position: absolute; top: 0; bottom: 0; width: 1px;
   background: var(--accent); opacity: .5; z-index: 3;
 }
+
+/* ---------------- 实测湿度复核 ---------------- */
+.review-layout {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 14px;
+  margin-top: 10px;
+  align-items: start;
+}
+.review-controls { border-right: 1px solid var(--line); padding-right: 14px; }
+.review-controls textarea {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.5; resize: vertical; min-height: 150px;
+}
+.review-controls .form-grid label.full { grid-column: 1 / -1; }
+.review-controls .form-grid { margin-top: 8px; }
+
+.rv-chart {
+  position: relative; height: 150px;
+  border-bottom: 1px dashed var(--line);
+  background: repeating-linear-gradient(90deg, #fcfaf4 0 20px, #f7f3e8 20px 40px);
+}
+.rv-chart svg { position: absolute; inset: 0; }
+.lg.plan { background: var(--hold); }
+.lg.meas { background: #34507d; }
+.lg.band { background: rgba(94, 139, 110, .18); border: 1px solid #5e8b6e; }
+.lg.over { background: var(--bad); }
+.lg.gap { background: repeating-linear-gradient(45deg, #cfc7b8 0 4px, #e8e2d2 4px 8px); }
+
+.rv-lane {
+  position: relative; height: 26px;
+  border-bottom: 1px solid #f0ebdf;
+  background: repeating-linear-gradient(90deg, #fffdf8 0 20px, #faf7ee 20px 40px);
+}
+.rv-window {
+  position: absolute; top: 4px; height: 18px; border-radius: 3px;
+  font-size: 10px; color: #fff; padding: 2px 5px;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.rv-gapband {
+  position: absolute; top: 0; bottom: 0;
+  background: repeating-linear-gradient(45deg, rgba(192,57,43,.18) 0 4px,
+    rgba(192,57,43,.06) 4px 8px);
+  border-left: 1px dashed var(--bad); border-right: 1px dashed var(--bad);
+}
+
+.rv-sample {
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 9px 12px; margin-top: 10px; background: #fff;
+}
+.rv-sample.insufficient { border-color: #d8c08a; background: #fdf8ea; }
+.rv-sample.review { border-color: #e0a89e; background: #fdf3f1; }
+.rv-sample.pass { border-color: #a9c9b1; background: #f2f8f3; }
+.rv-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rv-head .code { font-weight: 600; font-size: 14px; }
+.badge {
+  font-size: 11.5px; padding: 2px 10px; border-radius: 10px; color: #fff;
+}
+.badge.pass { background: var(--hold); }
+.badge.review { background: var(--bad); }
+.badge.insufficient { background: #b08d3f; }
+.rv-metrics { display: flex; gap: 18px; flex-wrap: wrap;
+  font-size: 12px; color: var(--muted); margin: 6px 0 2px; }
+.rv-metrics b { color: var(--ink); }
+.rv-metrics .over-limit { color: var(--bad); font-weight: 700; }
+.rv-intervals { margin-top: 6px; font-size: 12px; color: #5a544a; }
+.rv-intervals .iv-row {
+  display: inline-block; margin: 2px 6px 2px 0; padding: 1px 8px;
+  background: #f7ede2; border: 1px solid #e3cbb2; border-radius: 10px;
+}
+.rv-intervals .iv-row.neg { background: #e9eef6; border-color: #bccadc; }
+.rv-intervals .none { color: #998f7d; }
+.rv-uncovered { margin-top: 5px; font-size: 12px; color: #8a6a2b; }
+.rv-uncovered .u {
+  display: inline-block; margin: 2px 6px 2px 0; padding: 1px 8px;
+  background: #f6eccf; border: 1px dashed #c9a95e; border-radius: 10px;
+}
+
+.rv-record {
+  display: flex; justify-content: space-between; align-items: center; gap: 6px;
+  border: 1px dashed var(--line); border-radius: 5px;
+  padding: 6px 9px; margin-top: 7px; font-size: 12px; background: #fbf8f1;
+}
+.rv-record .ops { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+.rv-record .mini {
+  border: 1px solid var(--accent2); background: #fff7e8; border-radius: 4px;
+  padding: 1px 7px; cursor: pointer; font-family: inherit; font-size: 11.5px;
+  color: var(--accent);
+}
+.rv-record .mini:hover { background: #f6e8cc; }
+.rv-record .mini.del { border-color: var(--bad); color: var(--bad); background: #fdf1ef; }
+.rv-record .mini.del:hover { background: #f6e0db; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+.dot.pass { background: var(--hold); }
+.dot.review { background: var(--bad); }
+.dot.insufficient { background: #b08d3f; }

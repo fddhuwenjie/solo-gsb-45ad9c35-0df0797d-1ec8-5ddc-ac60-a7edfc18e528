@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS schedules (
     feasible   INTEGER NOT NULL,
     payload    TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reviews (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    conclusion TEXT NOT NULL,
+    note       TEXT NOT NULL DEFAULT '',
+    payload    TEXT NOT NULL
+);
 """
 
 
@@ -197,3 +204,46 @@ class DB:
             r = c.execute("SELECT payload FROM schedules ORDER BY id DESC LIMIT 1"
                           ).fetchone()
             return json.loads(r['payload']) if r else None
+
+    # ---------------- 实测复核记录 ---------------- #
+    def save_review(self, payload: dict, conclusion: str,
+                    note: str = '') -> int:
+        with self.conn() as c:
+            cur = c.execute(
+                "INSERT INTO reviews(conclusion,note,payload) VALUES (?,?,?)",
+                (str(conclusion), str(note or ''),
+                 json.dumps(payload, ensure_ascii=False)))
+            return int(cur.lastrowid)
+
+    def list_reviews(self, limit: int = 50) -> list[dict]:
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT id,created_at,conclusion,note,payload FROM reviews"
+                " ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+            out = []
+            for r in rows:
+                d = json.loads(r['payload'])
+                out.append({'id': r['id'], 'created_at': r['created_at'],
+                            'conclusion': r['conclusion'], 'note': r['note'],
+                            'summary': d.get('summary'),
+                            'parameters': d.get('parameters'),
+                            'payload': d})
+            return out
+
+    def get_review(self, rid: int) -> dict | None:
+        with self.conn() as c:
+            r = c.execute(
+                "SELECT id,created_at,conclusion,note,payload FROM reviews"
+                " WHERE id=?", (int(rid),)).fetchone()
+            if not r:
+                return None
+            d = json.loads(r['payload'])
+            return {'id': r['id'], 'created_at': r['created_at'],
+                    'conclusion': r['conclusion'], 'note': r['note'],
+                    'summary': d.get('summary'),
+                    'parameters': d.get('parameters'),
+                    'payload': d}
+
+    def delete_review(self, rid: int) -> None:
+        with self.conn() as c:
+            c.execute("DELETE FROM reviews WHERE id=?", (int(rid),))
