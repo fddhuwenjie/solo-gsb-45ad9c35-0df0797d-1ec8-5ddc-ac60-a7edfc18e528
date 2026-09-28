@@ -76,6 +76,76 @@
 
     <div id="detail" class="detail hidden"></div>
   </section>
+
+  <!-- 实测湿度复核 -->
+  <section class="panel full" id="reviewPanel">
+    <div class="panel-head">
+      <h2>⑤ 实测湿度复核（载入最近排程，粘贴传感器读数，精确积分超带剂量）</h2>
+      <div class="legend">
+        <span><i class="lg plan"></i>计划曲线</span>
+        <span><i class="lg meas"></i>实测曲线</span>
+        <span><i class="lg band"></i>允许带</span>
+        <span><i class="lg bad"></i>超带区间</span>
+        <span><i class="lg gap"></i>数据缺口</span>
+      </div>
+    </div>
+
+    <div class="review-grid">
+      <div class="review-form">
+        <div class="form-row rev">
+          <label>允许偏差（%RH）
+            <input type="number" id="rvTol" min="0.1" max="50" step="0.1" value="2">
+          </label>
+          <label>累计偏差剂量上限（%RH·分钟）
+            <input type="number" id="rvDose" min="0" step="0.1" value="60">
+          </label>
+          <label>最大采样间隔（分钟）
+            <input type="number" id="rvGap" min="1" step="1" value="1">
+          </label>
+          <label>裸值读数起始分钟
+            <input type="number" id="rvStart" min="0" step="1" value="0">
+          </label>
+        </div>
+        <div class="form-hint">每行一个采样点：单数字「50.2」按起始分钟逐分钟顺延；
+          也可写「12, 50.2」显式指定分钟（可混用）。相邻采样间隔<b>超过</b>最大采样
+          间隔的区间不做插值，窗口两端也不外推，该样本判为「数据不足」。</div>
+        <label class="rev-note">复核备注
+          <input type="text" id="rvNote" placeholder="如：2026-09-28 第三轮，传感器 SN-07">
+        </label>
+        <textarea id="rvReadings" rows="7" spellcheck="false"
+          placeholder="50.0&#10;50.2&#10;50.5&#10;# 也可写成：12, 50.5&#10;13, 50.8"></textarea>
+        <div class="runbar">
+          <button class="btn primary big" id="rvRunBtn">⇄ 执行复核</button>
+          <button class="btn" id="rvLoadBtn">↻ 从最近排程载入时间轴</button>
+          <button class="btn" id="rvSaveBtn">💾 保存复核记录</button>
+          <button class="btn" id="rvExportBtn">⬇ 导出复核 JSON</button>
+        </div>
+        <div id="rvStatus" class="status">尚未复核。请确认已生成排程，粘贴读数后点击「执行复核」。</div>
+      </div>
+    </div>
+
+    <div class="rv-chart-wrap">
+      <svg id="rvChart" height="280"></svg>
+    </div>
+
+    <div id="rvOverall" class="rv-overall hidden"></div>
+
+    <table class="rv-table hidden" id="rvTable">
+      <thead>
+        <tr>
+          <th>样本</th><th>在箱窗口（分钟）</th><th>数据覆盖</th>
+          <th>累计剂量（%RH·分钟）</th><th>超带区间</th><th>结论</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="rvTableBody"></tbody>
+    </table>
+
+    <div class="panel-head mt">
+      <h2>已保存的复核记录</h2>
+      <button class="btn small" id="rvRefreshBtn">刷新</button>
+    </div>
+    <div id="rvRecords" class="rv-records"></div>
+  </section>
 </main>
 
 <!-- 样本编辑弹层 -->

@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS schedules (
     feasible   INTEGER NOT NULL,
     payload    TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reviews (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    overall      TEXT NOT NULL,
+    note         TEXT NOT NULL DEFAULT '',
+    payload      TEXT NOT NULL
+);
 """
 
 
@@ -197,3 +204,42 @@ class DB:
             r = c.execute("SELECT payload FROM schedules ORDER BY id DESC LIMIT 1"
                           ).fetchone()
             return json.loads(r['payload']) if r else None
+
+    # ---------------- 实测复核记录 ---------------- #
+    def save_review(self, payload: dict) -> int:
+        with self.conn() as c:
+            cur = c.execute(
+                "INSERT INTO reviews(overall,note,payload) VALUES (?,?,?)",
+                (str(payload.get('overall', 'insufficient')),
+                 str(payload.get('note', '') or ''),
+                 json.dumps(payload, ensure_ascii=False)))
+            return int(cur.lastrowid)
+
+    def list_reviews(self) -> list[dict]:
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT id,created_at,overall,note,payload FROM reviews "
+                "ORDER BY id DESC").fetchall()
+            out = []
+            for r in rows:
+                d = json.loads(r['payload'])
+                d['id'] = r['id']
+                d['created_at'] = r['created_at']
+                d['overall'] = r['overall']
+                out.append(d)
+            return out
+
+    def get_review(self, rid: int) -> dict | None:
+        with self.conn() as c:
+            r = c.execute("SELECT * FROM reviews WHERE id=?", (rid,)).fetchone()
+            if not r:
+                return None
+            d = json.loads(r['payload'])
+            d['id'] = r['id']
+            d['created_at'] = r['created_at']
+            d['overall'] = r['overall']
+            return d
+
+    def delete_review(self, rid: int) -> None:
+        with self.conn() as c:
+            c.execute("DELETE FROM reviews WHERE id=?", (rid,))

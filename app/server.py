@@ -9,7 +9,7 @@ import os
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import scheduler
+from . import scheduler, review
 from .db import DB
 from .seed import seed_if_empty
 
@@ -197,6 +197,72 @@ def latest():
     if s is None:
         return jsonify({})
     return jsonify(s)
+
+
+# --------------------------------------------------------------------------- #
+# 实测湿度复核
+# --------------------------------------------------------------------------- #
+def _latest_or_400():
+    s = db.latest_schedule()
+    if not s or not s.get('segments'):
+        return None, (jsonify({'error': '尚无已保存的排程快照，请先生成可执行排程'}),
+                      400)
+    return s, None
+
+
+def _run_review(body: dict) -> dict:
+    sched, err = _latest_or_400()
+    if err is not None:
+        raise review.ReviewError('尚无已保存的排程快照，请先生成可执行排程')
+    return review.review_schedule(
+        sched,
+        body.get('readings_text', ''),
+        body.get('tolerance'),
+        body.get('dose_limit'),
+        body.get('max_gap'),
+        body.get('start_minute', 0),
+        note=str(body.get('note') or ''))
+
+
+@app.post('/api/review/run')
+def run_review():
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        return jsonify(_run_review(body))
+    except review.ReviewError as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.post('/api/review/save')
+def save_review():
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        res = _run_review(body)
+        res['schedule_snapshot'] = db.latest_schedule()
+        rid = db.save_review(res)
+    except review.ReviewError as e:
+        return jsonify({'error': str(e)}), 400
+    saved = db.get_review(rid)
+    return jsonify(saved), 201
+
+
+@app.get('/api/reviews')
+def list_reviews():
+    return jsonify(db.list_reviews())
+
+
+@app.get('/api/reviews/<int:rid>')
+def get_review(rid: int):
+    r = db.get_review(rid)
+    if r is None:
+        return jsonify({'error': '复核记录不存在'}), 404
+    return jsonify(r)
+
+
+@app.delete('/api/reviews/<int:rid>')
+def remove_review(rid: int):
+    db.delete_review(rid)
+    return jsonify({'ok': True})
 
 
 @app.errorhandler(500)

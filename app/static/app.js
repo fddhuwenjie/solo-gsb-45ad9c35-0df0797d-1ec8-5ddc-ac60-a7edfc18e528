@@ -724,6 +724,447 @@ const esc = (s) => String(s ?? '').replace(/[&<>"]/g,
   c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 // --------------------------------------------------------------------------- //
+// ⑤ 实测湿度复核
+// --------------------------------------------------------------------------- //
+const rv = {
+  result: null,       // /api/review/run 结果（未含快照）
+  schedule: null,     // 载入的最近排程
+};
+
+async function rvLoadSchedule(autoload = false) {
+  try {
+    const s = await api('/api/schedule/latest');
+    if (!s || !s.segments) {
+      rvSetStatus('最近没有可用的排程快照，请先在上方点击「生成可执行排程」。', 'bad');
+      return null;
+    }
+    if (!s.feasible) {
+      rvSetStatus('最近一次排程不可行，无法复核；请先调整输入并重新生成可行排程。', 'bad');
+      return null;
+    }
+    rv.schedule = s;
+    if (!autoload) rvSetStatus(
+      `已从最近排程载入时间轴：${(s.lanes || []).length} 个样本，总时长 ${
+        fmtMin(s.end_minute)}。粘贴读数后执行复核。`, 'ok');
+    return s;
+  } catch (e) {
+    rvSetStatus('载入排程失败：' + e.message, 'bad');
+    return null;
+  }
+}
+
+function rvParams() {
+  const tol = parseFloat($('#rvTol').value);
+  const dose = parseFloat($('#rvDose').value);
+  const gap = parseInt($('#rvGap').value, 10);
+  const start = parseInt($('#rvStart').value, 10) || 0;
+  return { tolerance: tol, dose_limit: dose, max_gap: gap, start_minute: start };
+}
+
+async function rvRun() {
+  const text = $('#rvReadings').value;
+  if (!text.trim()) return rvSetStatus('请先粘贴传感器读数。', 'bad');
+  const p = rvParams();
+  if (!(p.tolerance > 0)) return rvSetStatus('允许偏差必须为正数。', 'bad');
+  if (!(p.dose_limit >= 0)) return rvSetStatus('累计偏差剂量上限不能为负。', 'bad');
+  if (!(p.max_gap >= 1)) return rvSetStatus('最大采样间隔必须 ≥1 分钟。', 'bad');
+  rvSetStatus('正在按计划阶段切分并精确积分超带面积…', 'warn');
+  try {
+    rv.result = await api('/api/review/run', {
+      method: 'POST',
+      body: { readings_text: text, note: $('#rvNote').value.trim(), ...p },
+    });
+    rvRender();
+    const c = rv.result.summary;
+    rvSetStatus(`复核完成：${rv.result.readings_count} 个读数（第 ${
+      rv.result.first_minute}–${rv.result.last_minute} 分钟），共 ${c.total} 个样本 —— ` +
+      `通过 ${c.pass}、复核 ${c.review}、数据不足 ${c.insufficient}。`,
+      rv.result.overall === 'pass' ? 'ok' :
+      rv.result.overall === 'review' ? 'bad' : 'warn');
+  } catch (e) {
+    rv.result = null;
+    rvSetStatus('复核失败：' + e.message, 'bad');
+  }
+}
+
+async function rvSave() {
+  if (!rv.result) return rvSetStatus('请先执行复核，再保存记录。', 'bad');
+  const p = rvParams();
+  try {
+    await api('/api/review/save', {
+      method: 'POST',
+      body: { readings_text: $('#rvReadings').value,
+              note: $('#rvNote').value.trim(), ...p },
+    });
+    rvSetStatus('复核记录已保存。', 'ok');
+    rvLoadRecords();
+  } catch (e) {
+    rvSetStatus('保存失败：' + e.message, 'bad');
+  }
+}
+
+function rvSetStatus(msg, kind = '') {
+  const el = $('#rvStatus');
+  el.textContent = msg;
+  el.className = 'status ' + kind;
+}
+
+// ---- 图表 ----------------------------------------------------------------- //
+function rvRender() {
+  const r = rv.result;
+  $('#rvTable').classList.toggle('hidden', !r);
+  $('#rvOverall').classList.toggle('hidden', !r);
+  if (!r) return;
+  rvDrawChart(r);
+  rvRenderOverall(r);
+  rvRenderTable(r);
+}
+
+function rvRenderOverall(r) {
+  const box = $('#rvOverall');
+  box.className = 'rv-overall ' + r.overall;
+  const c = r.summary;
+  const label = { pass: '✓ 全部通过', review: '⚠ 存在需要复核的样本',
+                  insufficient: '▦ 存在数据不足的样本' }[r.overall];
+  const rule = r.overall === 'pass'
+    ? '所有样本数据完整且累计剂量均未超上限。'
+    : r.overall === 'review'
+      ? '存在数据完整但累计剂量超过上限的样本，需修复师复核；请查看下表超带区间。'
+      : '存在采样缺口/窗口缺读的样本，缺口段未插值、未计剂量，补齐数据前不得判为通过。';
+  box.innerHTML = `${label}：通过 ${c.pass} / 复核 ${c.review} / 数据不足 ${
+    c.insufficient}（样本共 ${c.total} 个；全部样本剂量合计 ${
+    num(c.total_dose)} %RH·分钟）<div style="font-weight:400;font-size:12.5px;margin-top:2px">${
+    rule}</div>`;
+}
+
+function rvDrawChart(r) {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = $('#rvChart');
+  svg.innerHTML = '';
+  const plan = r.plan_curve;
+  const meas = r.measured_points;
+  const tMax = Math.max(r.end_minute, r.last_minute || 0);
+  const total = Math.max(60, tMax + 10);
+  const pxPerMin = total > 1200 ? 0.8 : total > 600 ? 1.2 : 2;
+  const W = Math.max(900, total * pxPerMin + 90);
+  svg.setAttribute('width', W);
+  svg.setAttribute('viewBox', `0 0 ${W} 280`);
+  const ML = 52, MR = 14, MT = 18, MB = 30;
+  const pw = W - ML - MR, H = 280 - MT - MB;
+  const xOf = m => ML + m * pxPerMin;
+  const yOf = rh => MT + (1 - rh / 100) * H;
+
+  const el = (tag, attrs, parent = svg) => {
+    const n = document.createElementNS(svgNS, tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    parent.appendChild(n);
+    return n;
+  };
+
+  // RH 网格
+  for (const v of [0, 25, 50, 75, 100]) {
+    el('line', { x1: ML, x2: ML + pw, y1: yOf(v), y2: yOf(v),
+      stroke: v === 50 ? '#e2dac8' : '#f0ecdf' });
+    const t = el('text', { x: 6, y: yOf(v) + 3, 'font-size': 10,
+      fill: '#a89f8c' });
+    t.textContent = v;
+  }
+  // 时间刻度
+  const step = total > 1000 ? 120 : total > 500 ? 60 : 30;
+  for (let m = 0; m <= total; m += step) {
+    el('line', { x1: xOf(m), x2: xOf(m), y1: MT, y2: MT + H,
+      stroke: '#f0ecdf' });
+    const t = el('text', { x: xOf(m) + 2, y: 280 - 8, 'font-size': 9.5,
+      fill: '#a89f8c' });
+    t.textContent = fmtMin(m);
+  }
+
+  // 在箱窗口（各样本窗口并集底色）
+  const wins = (r.windows || []).filter(w => w.board != null && w.unboard != null)
+    .map(w => [w.board, w.unboard]).sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [a, b] of wins) {
+    if (merged.length && a <= merged[merged.length - 1][1]) {
+      merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], b);
+    } else merged.push([a, b]);
+  }
+  for (const [a, b] of merged) {
+    el('rect', { x: xOf(a), y: MT, width: Math.max(1, (b - a) * pxPerMin),
+      height: H, fill: 'rgba(185,138,78,.07)' });
+  }
+
+  // 允许带 P±tol：沿计划折线，以 ~1px 步长采样画填充多边形
+  const tol = r.params.tolerance;
+  const upper = [], lower = [];
+  for (let x = 0; x <= pw; x += 4) {
+    const t = x / pxPerMin;
+    let v = null;
+    for (let i = 0; i < plan.length - 1; i++) {
+      const p1 = plan[i], p2 = plan[i + 1];
+      if (p1.minute <= t && t <= p2.minute) {
+        const f = p2.minute === p1.minute ? 0 :
+          (t - p1.minute) / (p2.minute - p1.minute);
+        v = p1.rh + f * (p2.rh - p1.rh);
+        break;
+      }
+    }
+    if (v == null) continue;
+    upper.push([ML + x, yOf(Math.min(100, v + tol))]);
+    lower.push([ML + x, yOf(Math.max(0, v - tol))]);
+  }
+  if (upper.length > 1) {
+    const pts = upper.concat(lower.reverse())
+      .map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+    el('polygon', { points: pts, fill: 'rgba(94,139,110,.18)',
+      stroke: 'rgba(94,139,110,.35)', 'stroke-width': 0.6 });
+  }
+
+  // 数据不足样本：未覆盖段（灰纹）
+  for (const s of r.samples) {
+    for (const g of s.uncovered || []) {
+      el('rect', { x: xOf(g.start), y: MT + 2,
+        width: Math.max(1, (g.end - g.start) * pxPerMin), height: H - 4,
+        fill: 'url(#rvGapPattern)', opacity: 0.55 });
+    }
+  }
+  const defs = el('defs', {});
+  const pat = el('pattern', { id: 'rvGapPattern', width: 8, height: 8,
+    patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, defs);
+  el('rect', { width: 8, height: 8, fill: '#eef0f3' }, pat);
+  el('line', { x1: 0, y1: 0, x2: 0, y2: 8, stroke: '#9aa6b8',
+    'stroke-width': 3 }, pat);
+
+  // 超带区间（红色半透明竖带）
+  for (const s of r.samples) {
+    for (const e of s.exceedances || []) {
+      el('rect', { x: xOf(e.start), y: MT,
+        width: Math.max(1, (e.end - e.start) * pxPerMin), height: H,
+        fill: 'rgba(192,57,43,.13)' });
+    }
+  }
+
+  const pathFrom = pts => pts.map((p, i) =>
+    `${i ? 'L' : 'M'}${xOf(p.minute).toFixed(1)},${yOf(p.rh).toFixed(1)}`).join(' ');
+
+  // 计划曲线
+  if (plan.length > 1) {
+    el('path', { d: pathFrom(plan), fill: 'none', stroke: '#3f6e8f',
+      'stroke-width': 2.2 });
+  }
+
+  // 实测曲线：超间隔缺口处断开（不画跨缺口的线段）
+  const gapSet = new Set((r.holes || []).map(h => `${h.start}-${h.end}`));
+  let segPts = [];
+  const flush = () => {
+    if (segPts.length > 1) {
+      el('path', { d: pathFrom(segPts), fill: 'none', stroke: '#7a4f9e',
+        'stroke-width': 1.8, 'stroke-linejoin': 'round' });
+    }
+    segPts = [];
+  };
+  for (let i = 0; i < meas.length; i++) {
+    if (i > 0 && gapSet.has(`${meas[i - 1].minute}-${meas[i].minute}`)) flush();
+    segPts.push(meas[i]);
+  }
+  flush();
+  // 缺口处画红色虚线
+  for (const h of r.holes || []) {
+    const p1 = meas.find(p => p.minute === h.start);
+    const p2 = meas.find(p => p.minute === h.end);
+    if (p1 && p2) {
+      el('line', {
+        x1: xOf(p1.minute), y1: yOf(p1.rh),
+        x2: xOf(p2.minute), y2: yOf(p2.rh),
+        stroke: '#c0392b', 'stroke-width': 1.2, 'stroke-dasharray': '4 3' });
+    }
+  }
+  // 实采样点
+  for (const p of meas) {
+    el('circle', { cx: xOf(p.minute), cy: yOf(p.rh), r: 1.8,
+      fill: '#7a4f9e' });
+  }
+
+  // 入箱/出箱标记线
+  for (const w of r.windows || []) {
+    if (w.board == null) continue;
+    el('line', { x1: xOf(w.board), x2: xOf(w.board), y1: MT, y2: MT + H,
+      stroke: '#b98a4e', 'stroke-width': 1, 'stroke-dasharray': '2 3' });
+    if (w.unboard != null) {
+      el('line', { x1: xOf(w.unboard), x2: xOf(w.unboard), y1: MT,
+        y2: MT + H, stroke: '#6f86a8', 'stroke-width': 1,
+        'stroke-dasharray': '2 3' });
+    }
+  }
+}
+
+// ---- 结果表 ---------------------------------------------------------------- //
+function rvRenderTable(r) {
+  const body = $('#rvTableBody');
+  body.innerHTML = '';
+  const labels = { pass: '通过', review: '复核', insufficient: '数据不足' };
+  for (const s of r.samples) {
+    const tr = document.createElement('tr');
+    const win = s.board == null ? '—' :
+      `${fmtMin(s.board)} – ${fmtMin(s.unboard)}`;
+    const cover = s.board == null ? '—' :
+      `${num(s.covered_minutes)} / ${num(s.window_minutes)} 分钟`;
+    const doseTxt = s.dose == null ? '—（数据不足，缺口未计）' :
+      `${num(s.dose)} / ${num(s.dose_limit)}`;
+    const over = s.dose != null && s.dose > s.dose_limit + 1e-9;
+    const ratio = s.dose == null || !s.dose_limit ? 0 :
+      Math.min(1, s.dose / s.dose_limit);
+    tr.innerHTML = `
+      <td><b>${esc(s.code)}</b><br><span style="color:#998f7d;font-size:11px">#${
+        s.sample_id}</span></td>
+      <td>${win}</td>
+      <td>${cover}${(s.uncovered || []).length ?
+        `<br><span style="color:#42506a">${s.uncovered.length} 处缺口</span>` : ''}</td>
+      <td>${doseTxt}
+        ${s.dose != null ? `<div class="dose-bar ${over ? 'over' : ''}"><i style="width:${
+          ratio * 100}%"></i></div>${over ? '<span style="color:var(--bad);font-size:11px">超上限</span>' : ''}` : ''}
+      </td>
+      <td>${(s.exceedances || []).length ?
+        `${s.exceedances.length} 段，共 ${
+          num(s.exceedances.reduce((a, e) => a + e.minutes, 0))} 分钟` :
+        '无'}</td>
+      <td><span class="badge ${s.conclusion}">${labels[s.conclusion]}</span></td>
+      <td><button class="rv-toggle">明细 ▾</button></td>`;
+    body.appendChild(tr);
+
+    const dr = document.createElement('tr');
+    dr.className = 'detail-row hidden';
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.innerHTML = rvDetailHtml(s);
+    dr.appendChild(td);
+    body.appendChild(dr);
+    tr.querySelector('.rv-toggle').onclick = () => {
+      dr.classList.toggle('hidden');
+      tr.querySelector('.rv-toggle').textContent =
+        dr.classList.contains('hidden') ? '明细 ▾' : '明细 ▴';
+    };
+  }
+}
+
+function rvDetailHtml(s) {
+  const gaps = (s.uncovered || []).map(g =>
+    `<div class="gapline">▦ 缺口 ${fmtMin(g.start)}–${fmtMin(g.end)}（${
+      num(g.minutes)} 分钟，未插值未计剂量）：${esc(g.reason)}</div>`).join('');
+  const excs = (s.exceedances || []).map(e =>
+    `<div class="excline">⛔ <b>${fmtMin(e.start)}–${fmtMin(e.end)}</b>（${
+      esc(e.phase)}${e.step ? ' 第' + e.step + '档' : ''}，${
+      num(e.minutes)} 分钟）：实测 ${num(e.meas_start)}→${num(e.meas_end)}%，计划 ${
+      num(e.plan_start)}→${num(e.plan_end)}%，最大偏差 ${num(e.max_dev)}%，该段剂量 <b>${
+      num(e.dose)}</b></div>`).join('');
+  const phases = (s.phases || []).map(p =>
+    `<div>· ${esc(p.phase)}${p.step ? ' 第' + p.step + '档' : ''} ${
+      fmtMin(p.start)}–${fmtMin(p.end)}：剂量 ${num(p.dose)}${
+      p.exceed_minutes > 0 ? `（超带 ${num(p.exceed_minutes)} 分钟）` : '（在带内）'}</div>`
+  ).join('');
+  return `<div class="rv-detail-box">
+    <h5>计划阶段切分与剂量</h5>${phases || '<div>（无阶段数据）</div>'}
+    ${excs ? `<h5>超带区间</h5>${excs}` : '<h5>超带区间</h5><div>无</div>'}
+    ${gaps ? `<h5>未覆盖段</h5>${gaps}` : ''}
+  </div>`;
+}
+
+// ---- 记录列表 / 导出 ------------------------------------------------------- //
+async function rvLoadRecords() {
+  const box = $('#rvRecords');
+  try {
+    const list = await api('/api/reviews');
+    box.innerHTML = '';
+    if (!list.length) {
+      box.innerHTML = '<div style="color:#998f7d;font-size:12px;padding:4px">暂无已保存的复核记录。</div>';
+      return;
+    }
+    const labels = { pass: '通过', review: '复核', insufficient: '数据不足' };
+    for (const rec of list) {
+      const div = document.createElement('div');
+      div.className = 'rv-record';
+      const c = rec.summary || {};
+      div.innerHTML = `
+        <span class="rid">#${rec.id}</span>
+        <span class="badge ${rec.overall}">${labels[rec.overall] || rec.overall}</span>
+        <span>${rec.created_at} UTC</span>
+        <span>${esc(rec.note || '（无备注）')}</span>
+        <span style="color:#998f7d">读数 ${rec.readings_count} 个（${
+          rec.first_minute}–${rec.last_minute} 分钟）｜通过 ${c.pass ?? '-'} / 复核 ${
+          c.review ?? '-'} / 数据不足 ${c.insufficient ?? '-'}｜总剂量 ${
+          num(c.total_dose)}</span>
+        <span class="btns">
+          <span class="mlink" data-act="load">载入</span>
+          <span class="mlink" data-act="export">导出</span>
+          <span class="x" data-act="del">✕</span>
+        </span>`;
+      div.querySelector('[data-act="load"]').onclick = () => rvLoadRecord(rec.id);
+      div.querySelector('[data-act="export"]').onclick = () => rvExport(rec.id);
+      div.querySelector('[data-act="del"]').onclick = async () => {
+        if (!confirm(`确定删除复核记录 #${rec.id}？`)) return;
+        await api(`/api/reviews/${rec.id}`, { method: 'DELETE' });
+        rvLoadRecords();
+      };
+      box.appendChild(div);
+    }
+  } catch (e) {
+    box.innerHTML = `<div style="color:var(--bad);font-size:12px">记录加载失败：${
+      esc(e.message)}</div>`;
+  }
+}
+
+async function rvLoadRecord(rid) {
+  try {
+    const rec = await api(`/api/reviews/${rid}`);
+    rv.result = rec;
+    rv.schedule = rec.schedule_snapshot || null;
+    const p = rec.params || {};
+    $('#rvTol').value = p.tolerance ?? 2;
+    $('#rvDose').value = p.dose_limit ?? 60;
+    $('#rvGap').value = p.max_gap ?? 1;
+    $('#rvStart').value = p.start_minute ?? 0;
+    $('#rvNote').value = rec.note || '';
+    rvRender();
+    rvSetStatus(`已载入复核记录 #${rid}（${rec.created_at} UTC）。`, 'ok');
+    document.getElementById('reviewPanel').scrollIntoView({ behavior: 'smooth' });
+  } catch (e) {
+    rvSetStatus('载入记录失败：' + e.message, 'bad');
+  }
+}
+
+async function rvExport(rid = null) {
+  let payload;
+  if (rid != null) {
+    payload = await api(`/api/reviews/${rid}`);
+  } else {
+    if (!rv.result) return rvSetStatus('请先执行复核，再导出。', 'bad');
+    payload = {
+      exported_at: new Date().toISOString(),
+      ...rv.result,
+      schedule_snapshot: rv.schedule,
+    };
+  }
+  const blob = new Blob([JSON.stringify(payload, null, 2)],
+    { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `humidity-review-${rid != null ? rid + '-' : ''}${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+$('#rvLoadBtn').onclick = () => rvLoadSchedule();
+$('#rvRunBtn').onclick = rvRun;
+$('#rvSaveBtn').onclick = rvSave;
+$('#rvExportBtn').onclick = () => rvExport();
+$('#rvRefreshBtn').onclick = rvLoadRecords;
+
+// 初始化：尝试静默载入最近排程；拉取记录列表
+(async function rvInit() {
+  await rvLoadSchedule(true);
+  rvLoadRecords();
+})();
+
+// --------------------------------------------------------------------------- //
 // 事件绑定
 // --------------------------------------------------------------------------- //
 $('#addSampleBtn').onclick = () => openSampleModal();

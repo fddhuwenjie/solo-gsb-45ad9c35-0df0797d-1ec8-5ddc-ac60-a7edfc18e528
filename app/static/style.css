@@ -245,3 +245,85 @@ input, select {
   position: absolute; top: 0; bottom: 0; width: 1px;
   background: var(--accent); opacity: .5; z-index: 3;
 }
+
+/* ===== 实测湿度复核 ===== */
+.panel.full { grid-column: 1 / -1; }
+.review-grid { margin-top: 10px; }
+.form-row.rev { flex-wrap: wrap; align-items: flex-end; }
+.form-row.rev label { min-width: 150px; flex: 0 1 180px; font-size: 12px; }
+.rev-note { display: block; font-size: 12px; color: var(--muted); margin-top: 10px; }
+textarea#rvReadings {
+  width: 100%; margin-top: 6px; font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.5; padding: 8px 10px;
+  border: 1px solid #c9c0ae; border-radius: 5px; background: #fffefb;
+  color: var(--ink); resize: vertical;
+}
+
+.rv-chart-wrap {
+  margin-top: 12px; border: 1px solid var(--line); border-radius: 6px;
+  background: repeating-linear-gradient(90deg, #fcfaf4 0 24px, #f7f3e8 24px 48px);
+  overflow-x: auto;
+}
+#rvChart { display: block; min-width: 100%; }
+
+.rv-overall {
+  margin: 10px 0 6px; padding: 10px 14px; border-radius: 6px;
+  font-size: 14px; font-weight: 600;
+}
+.rv-overall.pass { background: #e9f1ea; border: 1px solid #a9c9b1; color: #2f5d3e; }
+.rv-overall.review { background: #fbf3df; border: 1px solid #ddc07a; color: #7a5a10; }
+.rv-overall.insufficient { background: #eceef1; border: 1px solid #b9c0cb; color: #42506a; }
+
+.rv-table {
+  width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 10px;
+}
+.rv-table th, .rv-table td {
+  border-bottom: 1px solid #ece5d5; padding: 7px 8px; text-align: left;
+  vertical-align: top;
+}
+.rv-table th { color: var(--muted); font-size: 11.5px; background: #f8f4ea; }
+.rv-table tr.detail-row td { background: #fbf8f1; }
+.badge {
+  display: inline-block; padding: 2px 10px; border-radius: 10px;
+  font-size: 11.5px; font-weight: 600; white-space: nowrap;
+}
+.badge.pass { background: #dceade; color: #2f5d3e; }
+.badge.review { background: #f7e3b6; color: #7a5a10; }
+.badge.insufficient { background: #dfe3e9; color: #42506a; }
+.dose-bar {
+  position: relative; height: 6px; background: #e8e2d2; border-radius: 3px;
+  margin-top: 4px; min-width: 90px;
+}
+.dose-bar > i {
+  position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px;
+  background: var(--hold);
+}
+.dose-bar.over > i { background: var(--bad); }
+.rv-detail-box { font-size: 11.5px; color: #5a544a; line-height: 1.7; }
+.rv-detail-box h5 { margin: 4px 0 2px; font-size: 12px; color: var(--accent); }
+.rv-detail-box .gapline { color: #42506a; }
+.rv-detail-box .excline b { color: var(--bad); }
+.rv-toggle {
+  border: 1px solid var(--accent2); background: #fff7e8; border-radius: 4px;
+  padding: 1px 8px; cursor: pointer; font-family: inherit; font-size: 11px;
+  color: var(--accent);
+}
+.rv-toggle:hover { background: #f6e8cc; }
+
+.rv-records { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.rv-record {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border: 1px dashed var(--line); border-radius: 5px; padding: 7px 10px;
+  background: #fbf8f1; font-size: 12px;
+}
+.rv-record .rid { color: var(--muted); }
+.rv-record .btns { margin-left: auto; display: flex; gap: 6px; }
+.rv-record .x { color: var(--bad); cursor: pointer; font-weight: bold; }
+.rv-record .mlink { color: var(--accent); cursor: pointer; text-decoration: underline; }
+
+.lg.plan { background: #3f6e8f; }
+.lg.meas { background: #7a4f9e; }
+.lg.band { background: rgba(127,160,131,.35); }
+.lg.gap {
+  background: repeating-linear-gradient(45deg,#9aa6b8 0 3px,#dfe3e9 3px 6px);
+}
